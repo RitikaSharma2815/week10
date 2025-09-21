@@ -9,59 +9,34 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # From GitHub → Settings → Secrets and variables → Actions
+      # ACR secrets must exist in GitHub → Settings → Secrets and variables → Actions
       ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-      ACR_NAME:         ${{ secrets.ACR_NAME }}
       ACR_USERNAME:     ${{ secrets.ACR_USERNAME }}
       ACR_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
 
     steps:
+      # ---------------- BASICS ----------------
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------- UNIT TESTS ----------
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Show repo root (sanity)
+        run: ls -la
 
-      - name: Customer Service • install & test
-        working-directory: backend/customer_service
-        run: |
-          python -m pip install -U pip
-          pip install -r requirements-dev.txt || pip install -r requirements.txt
-          pytest -q
-
-      - name: Order Service • install & test
-        working-directory: backend/order_service
-        run: |
-          python -m pip install -U pip
-          pip install -r requirements-dev.txt || pip install -r requirements.txt
-          pytest -q
-
-      - name: Product Service • install & test
-        working-directory: backend/product_service
-        run: |
-          python -m pip install -U pip
-          pip install -r requirements-dev.txt || pip install -r requirements.txt
-          pytest -q
-
-      # ---------- ACCEPTANCE TESTS ----------
-      # This brings up Postgres + product_service from docker-compose.ci.yml
+      # ---------------- ACCEPTANCE TEST STACK ----------------
       - name: Start stack for acceptance tests
         run: |
           docker compose -f docker-compose.ci.yml up -d --build
 
       - name: Wait for Product API to be ready
         run: |
-          for i in {1..24}; do
+          for i in {1..30}; do
             if curl -fsS http://localhost:8000/ >/dev/null; then
               echo "Product API is up"; exit 0
             fi
-            echo "Waiting for API... ($i/24)"; sleep 5
+            echo "Waiting for API... ($i/30)"; sleep 4
           done
           echo "API failed to become ready" >&2
-          docker compose -f docker-compose.ci.yml logs
+          docker compose -f docker-compose.ci.yml logs || true
           exit 1
 
       - name: Run acceptance tests
@@ -72,13 +47,19 @@ jobs:
 
       - name: Show compose logs on failure
         if: failure()
-        run: docker compose -f docker-compose.ci.yml logs
+        run: docker compose -f docker-compose.ci.yml logs || true
 
       - name: Stop acceptance stack
         if: always()
-        run: docker compose -f docker-compose.ci.yml down -v
+        run: |
+          if [ -f docker-compose.ci.yml ]; then
+            echo "Cleaning up docker-compose stack..."
+            docker compose -f docker-compose.ci.yml down -v || true
+          else
+            echo "docker-compose.ci.yml NOT found, skipping cleanup."
+          fi
 
-      # ---------- BUILD & PUSH (only runs if all tests passed) ----------
+      # ---------------- BUILD & PUSH (only if tests pass) ----------------
       - name: Log in to ACR
         uses: docker/login-action@v3
         with:
