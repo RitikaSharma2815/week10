@@ -9,31 +9,35 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ACR secrets must exist in GitHub → Settings → Secrets and variables → Actions
       ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
       ACR_USERNAME:     ${{ secrets.ACR_USERNAME }}
       ACR_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
 
     steps:
-      # ---------------- BASICS ----------------
+      # --- BASICS ---
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Show repo root (sanity)
         run: ls -la
 
-      # ---------------- ACCEPTANCE TEST STACK ----------------
+      # --- ACCEPTANCE TEST STACK ---
       - name: Start stack for acceptance tests
-        run: |
-          docker compose -f docker-compose.ci.yml up -d --build
+        run: docker compose -f docker-compose.ci.yml up -d --build
+
+      - name: Show compose ps
+        run: docker compose -f docker-compose.ci.yml ps
+
+      - name: Peek product_service logs (non-fatal)
+        run: docker compose -f docker-compose.ci.yml logs --tail=200 product_service || true
 
       - name: Wait for Product API to be ready
         run: |
-          for i in {1..30}; do
+          for i in {1..40}; do
             if curl -fsS http://localhost:8000/ >/dev/null; then
               echo "Product API is up"; exit 0
             fi
-            echo "Waiting for API... ($i/30)"; sleep 4
+            echo "Waiting for API... ($i/40)"; sleep 4
           done
           echo "API failed to become ready" >&2
           docker compose -f docker-compose.ci.yml logs || true
@@ -59,7 +63,7 @@ jobs:
             echo "docker-compose.ci.yml NOT found, skipping cleanup."
           fi
 
-      # ---------------- BUILD & PUSH (only if tests pass) ----------------
+      # --- BUILD & PUSH (only if tests pass) ---
       - name: Log in to ACR
         uses: docker/login-action@v3
         with:
