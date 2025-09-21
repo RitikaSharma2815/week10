@@ -7,13 +7,11 @@ on:
 
 jobs:
   deploy-prod:
+    if: ${{ secrets.AZURE_CREDENTIALS != '' }}
     runs-on: ubuntu-latest
     env:
       RG: sit722-prod-rg
       REGION: australiaeast
-      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,7 +23,6 @@ jobs:
       - name: Ensure RG exists
         run: az group create -n "$RG" -l "$REGION"
 
-      # (Re)create Product DB
       - name: Replace prod-product-db
         run: |
           az container delete -g "$RG" -n prod-product-db --yes --no-wait || true
@@ -36,10 +33,8 @@ jobs:
             --ports 5432 --ip-address Public \
             --environment-variables POSTGRES_DB=products POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
             --location "$REGION"
-          DB_IP=$(az container show -g "$RG" -n prod-product-db --query ipAddress.ip -o tsv)
-          echo "DB_IP=$DB_IP" >> $GITHUB_ENV
+          echo "DB_IP=$(az container show -g "$RG" -n prod-product-db --query ipAddress.ip -o tsv)" >> $GITHUB_ENV
 
-      # (Re)create Product API
       - name: Replace prod-product
         run: |
           az container delete -g "$RG" -n prod-product --yes --no-wait || true
@@ -57,10 +52,8 @@ jobs:
               POSTGRES_PASSWORD=postgres \
               POSTGRES_DB=products \
             --location "$REGION"
-          PRODUCT_IP=$(az container show -g "$RG" -n prod-product --query ipAddress.ip -o tsv)
-          echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+          echo "PRODUCT_IP=$(az container show -g "$RG" -n prod-product --query ipAddress.ip -o tsv)" >> $GITHUB_ENV
 
-      # (Re)create Frontend
       - name: Replace prod-frontend
         run: |
           az container delete -g "$RG" -n prod-frontend --yes --no-wait || true
@@ -75,7 +68,6 @@ jobs:
             --dns-name-label sit722-prod-$RANDOM \
             --location "$REGION"
 
-      # quick smoke
       - name: Smoke test Product API
         run: |
           echo "Testing http://$PRODUCT_IP:8000"
@@ -87,3 +79,12 @@ jobs:
           done
           echo "Product endpoint failed" >&2
           exit 1
+
+  skip-deploy-note:
+    if: ${{ secrets.AZURE_CREDENTIALS == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip production deploy
+        run: |
+          echo "AZURE_CREDENTIALS not set. Skipping production deploy."
+          echo "Production is already running manually."
