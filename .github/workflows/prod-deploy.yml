@@ -6,24 +6,53 @@ on:
   workflow_dispatch:
 
 jobs:
-  deploy-prod:
-    if: ${{ secrets.AZURE_CREDENTIALS != '' }}
+  deploy:
     runs-on: ubuntu-latest
+
+    # Common env you already have (from earlier)
     env:
       RG: sit722-prod-rg
       REGION: australiaeast
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+
     steps:
       - uses: actions/checkout@v4
 
+      # Gate: do we have AZURE_CREDENTIALS?
+      - name: Gate deploy on presence of AZURE_CREDENTIALS
+        id: gate
+        shell: bash
+        run: |
+          if [ -z "${{ secrets.AZURE_CREDENTIALS }}" ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip note (no credentials configured)
+        if: steps.gate.outputs.deploy == 'false'
+        run: |
+          echo "::notice::AZURE_CREDENTIALS not set in repo secrets."
+          echo "Skipping production deployment. Add the Service Principal JSON"
+          echo "as repo secret 'AZURE_CREDENTIALS' and re-run."
+
+      # ---- Real deploy only when deploy=true ----
+
       - name: Azure login
+        if: steps.gate.outputs.deploy == 'true'
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Ensure RG exists
+      - name: Ensure resource group exists
+        if: steps.gate.outputs.deploy == 'true'
         run: az group create -n "$RG" -l "$REGION"
 
       - name: Replace prod-product-db
+        if: steps.gate.outputs.deploy == 'true'
+        shell: bash
         run: |
           az container delete -g "$RG" -n prod-product-db --yes --no-wait || true
           az container wait   -g "$RG" -n prod-product-db --deleted --interval 5 --timeout 120 || true
@@ -33,9 +62,12 @@ jobs:
             --ports 5432 --ip-address Public \
             --environment-variables POSTGRES_DB=products POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
             --location "$REGION"
-          echo "DB_IP=$(az container show -g "$RG" -n prod-product-db --query ipAddress.ip -o tsv)" >> $GITHUB_ENV
+          DB_IP=$(az container show -g "$RG" -n prod-product-db --query ipAddress.ip -o tsv)
+          echo "DB_IP=$DB_IP" >> "$GITHUB_ENV"
 
       - name: Replace prod-product
+        if: steps.gate.outputs.deploy == 'true'
+        shell: bash
         run: |
           az container delete -g "$RG" -n prod-product --yes --no-wait || true
           az container wait   -g "$RG" -n prod-product --deleted --interval 5 --timeout 120 || true
@@ -52,9 +84,12 @@ jobs:
               POSTGRES_PASSWORD=postgres \
               POSTGRES_DB=products \
             --location "$REGION"
-          echo "PRODUCT_IP=$(az container show -g "$RG" -n prod-product --query ipAddress.ip -o tsv)" >> $GITHUB_ENV
+          PRODUCT_IP=$(az container show -g "$RG" -n prod-product --query ipAddress.ip -o tsv)
+          echo "PRODUCT_IP=$PRODUCT_IP" >> "$GITHUB_ENV"
 
       - name: Replace prod-frontend
+        if: steps.gate.outputs.deploy == 'true'
+        shell: bash
         run: |
           az container delete -g "$RG" -n prod-frontend --yes --no-wait || true
           az container wait   -g "$RG" -n prod-frontend --deleted --interval 5 --timeout 120 || true
@@ -69,6 +104,8 @@ jobs:
             --location "$REGION"
 
       - name: Smoke test Product API
+        if: steps.gate.outputs.deploy == 'true'
+        shell: bash
         run: |
           echo "Testing http://$PRODUCT_IP:8000"
           for i in {1..12}; do
@@ -79,12 +116,3 @@ jobs:
           done
           echo "Product endpoint failed" >&2
           exit 1
-
-  skip-deploy-note:
-    if: ${{ secrets.AZURE_CREDENTIALS == '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Skip production deploy
-        run: |
-          echo "AZURE_CREDENTIALS not set. Skipping production deploy."
-          echo "Production is already running manually."
