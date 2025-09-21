@@ -28,8 +28,9 @@ jobs:
       - name: Show compose ps
         run: docker compose -f docker-compose.ci.yml ps
 
-      - name: Peek product_service logs (non-fatal)
-        run: docker compose -f docker-compose.ci.yml logs --tail=200 product_service || true
+      - name: Show product_service logs
+        run: docker compose -f docker-compose.ci.yml logs --tail=100 product_service || true
+
 
       - name: Wait for Product API to be ready
         run: |
