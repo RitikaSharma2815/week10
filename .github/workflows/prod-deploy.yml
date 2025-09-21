@@ -1,0 +1,89 @@
+name: Production Deploy (on main)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy-prod:
+    runs-on: ubuntu-latest
+    env:
+      RG: sit722-prod-rg
+      REGION: australiaeast
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Ensure RG exists
+        run: az group create -n "$RG" -l "$REGION"
+
+      # (Re)create Product DB
+      - name: Replace prod-product-db
+        run: |
+          az container delete -g "$RG" -n prod-product-db --yes --no-wait || true
+          az container wait   -g "$RG" -n prod-product-db --deleted --interval 5 --timeout 120 || true
+          az container create -g "$RG" -n prod-product-db \
+            --image docker.io/library/postgres:15-alpine \
+            --os-type Linux --cpu 1 --memory 1 \
+            --ports 5432 --ip-address Public \
+            --environment-variables POSTGRES_DB=products POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
+            --location "$REGION"
+          DB_IP=$(az container show -g "$RG" -n prod-product-db --query ipAddress.ip -o tsv)
+          echo "DB_IP=$DB_IP" >> $GITHUB_ENV
+
+      # (Re)create Product API
+      - name: Replace prod-product
+        run: |
+          az container delete -g "$RG" -n prod-product --yes --no-wait || true
+          az container wait   -g "$RG" -n prod-product --deleted --interval 5 --timeout 120 || true
+          az container create -g "$RG" -n prod-product \
+            --image "$ACR_LOGIN_SERVER/product_service:testing" \
+            --registry-login-server "$ACR_LOGIN_SERVER" \
+            --registry-username "$ACR_USERNAME" \
+            --registry-password "$ACR_PASSWORD" \
+            --os-type Linux --cpu 1 --memory 1 \
+            --ports 8000 --ip-address Public \
+            --environment-variables \
+              POSTGRES_HOST=${{ env.DB_IP }} \
+              POSTGRES_USER=postgres \
+              POSTGRES_PASSWORD=postgres \
+              POSTGRES_DB=products \
+            --location "$REGION"
+          PRODUCT_IP=$(az container show -g "$RG" -n prod-product --query ipAddress.ip -o tsv)
+          echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+
+      # (Re)create Frontend
+      - name: Replace prod-frontend
+        run: |
+          az container delete -g "$RG" -n prod-frontend --yes --no-wait || true
+          az container wait   -g "$RG" -n prod-frontend --deleted --interval 5 --timeout 120 || true
+          az container create -g "$RG" -n prod-frontend \
+            --image "$ACR_LOGIN_SERVER/frontend:testing" \
+            --registry-login-server "$ACR_LOGIN_SERVER" \
+            --registry-username "$ACR_USERNAME" \
+            --registry-password "$ACR_PASSWORD" \
+            --os-type Linux --cpu 1 --memory 1.5 \
+            --ports 80 --ip-address Public \
+            --dns-name-label sit722-prod-$RANDOM \
+            --location "$REGION"
+
+      # quick smoke
+      - name: Smoke test Product API
+        run: |
+          echo "Testing http://$PRODUCT_IP:8000"
+          for i in {1..12}; do
+            if curl -fsS "http://$PRODUCT_IP:8000" | grep -q 'Welcome to the Product Service'; then
+              echo "OK"; exit 0
+            fi
+            echo "retry $i"; sleep 5
+          done
+          echo "Product endpoint failed" >&2
+          exit 1
