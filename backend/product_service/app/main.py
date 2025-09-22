@@ -83,7 +83,7 @@ if AZURE_STORAGE_ACCOUNT_NAME and AZURE_STORAGE_ACCOUNT_KEY:
             f"Product Service: Failed to initialize Azure BlobServiceClient. Check credentials and account name. Error: {e}",
             exc_info=True,
         )
-        blob_service_client = None  # Set to None if initialization fails
+        blob_service_client = None  
 else:
     logger.warning(
         "Product Service: Azure Storage credentials not found. Image upload functionality will be disabled."
@@ -114,7 +114,7 @@ app = FastAPI(
 # Enable CORS (for frontend dev/testing)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Use specific origins in production
+    allow_origins=["*"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -271,7 +271,7 @@ async def consume_order_placed_events(db_session: Session):
                                             "available_stock": db_product.stock_quantity,
                                         }
                                     )
-                                    break  # Fail entire order deduction if stock is insufficient
+                                    break 
 
                                 db_product.stock_quantity -= quantity
                                 local_db_session.add(db_product)
@@ -279,7 +279,7 @@ async def consume_order_placed_events(db_session: Session):
                                     f"Product Service: Deducted {quantity} from product {product_id} for order {order_id}. New stock: {db_product.stock_quantity}."
                                 )
 
-                                # Optional: Log or trigger alert if stock falls below threshold
+                               
                                 if db_product.stock_quantity < RESTOCK_THRESHOLD:
                                     logger.warning(
                                         f"Product Service: ALERT! Stock for product '{db_product.name}' (ID: {db_product.product_id}) is low: {db_product.stock_quantity}."
@@ -299,7 +299,7 @@ async def consume_order_placed_events(db_session: Session):
                                     },
                                 )
                             else:
-                                local_db_session.rollback()  # Rollback all changes if any item fails
+                                local_db_session.rollback() 
                                 logger.error(
                                     f"Product Service: Failed to deduct stock for order {order_id}. Rolling back. Publishing 'product.stock.deduction.failed' event."
                                 )
@@ -365,7 +365,7 @@ async def startup_event():
             logger.info(
                 "Product Service: Successfully connected to PostgreSQL and ensured tables exist."
             )
-            break  # Exit loop if successful
+            break  
         except OperationalError as e:
             logger.warning(f"Product Service: Failed to connect to PostgreSQL: {e}")
             if i < max_retries - 1:
@@ -377,15 +377,13 @@ async def startup_event():
                 logger.critical(
                     f"Product Service: Failed to connect to PostgreSQL after {max_retries} attempts. Exiting application."
                 )
-                sys.exit(1)  # Critical failure: exit if DB connection is unavailable
+                sys.exit(1)  
         except Exception as e:
             logger.critical(
                 f"Product Service: An unexpected error occurred during database startup: {e}",
                 exc_info=True,
             )
             sys.exit(1)
-
-    # Connect to RabbitMQ and start consumer
     if await connect_to_rabbitmq():
         asyncio.create_task(consume_order_placed_events(next(get_db())))
     else:
@@ -517,7 +515,7 @@ async def update_product(
         setattr(db_product, key, value)
 
     try:
-        db.add(db_product)  # Mark for update
+        db.add(db_product) 
         db.commit()
         db.refresh(db_product)
         logger.info(f"Product Service: Product {product_id} updated successfully.")
@@ -599,12 +597,12 @@ async def upload_product_image(
         )
 
     try:
-        # Create a unique blob name (e.g., product_id/timestamp_originalfilename.ext)
+       
         file_extension = (
             os.path.splitext(file.filename)[1]
             if os.path.splitext(file.filename)[1]
             else ".jpg"
-        )  # Ensure extension
+        )  
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         blob_name = f"{timestamp}{file_extension}"
 
@@ -630,10 +628,10 @@ async def upload_product_image(
             permission=BlobSasPermissions(read=True),
             expiry=datetime.utcnow() + timedelta(hours=AZURE_SAS_TOKEN_EXPIRY_HOURS),
         )
-        # Construct the full URL with SAS token
+    
         image_url = f"{blob_client.url}?{sas_token}"
 
-        # Update the product in the database with the image URL (including SAS token)
+      
         db_product.image_url = image_url
         db.add(db_product)
         db.commit()
@@ -656,7 +654,7 @@ async def upload_product_image(
         )
 
 
-# --- Endpoint for Stock Deduction ---
+
 @app.patch(
     "/products/{product_id}/deduct-stock",
     response_model=ProductResponse,
@@ -687,7 +685,7 @@ async def deduct_product_stock_sync(
             detail=f"Insufficient stock for product '{db_product.name}'. Only {db_product.stock_quantity} available.",
         )
 
-    # Perform deduction
+
     db_product.stock_quantity -= request.quantity_to_deduct
 
     try:
@@ -698,7 +696,6 @@ async def deduct_product_stock_sync(
             f"Product Service: Stock for product {product_id} updated to {db_product.stock_quantity}. Deducted {request.quantity_to_deduct}."
         )
 
-        # Optional: Log or trigger alert if stock falls below threshold
         if db_product.stock_quantity < RESTOCK_THRESHOLD:
             logger.warning(
                 f"Product Service: ALERT! Stock for product '{db_product.name}' (ID: {db_product.product_id}) is low: {db_product.stock_quantity}."

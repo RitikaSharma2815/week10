@@ -70,9 +70,9 @@ jobs:
       ACR_USERNAME:       ${{ secrets.ACR_USERNAME }}
       ACR_PASSWORD:       ${{ secrets.ACR_PASSWORD }}
       AZURE_CREDENTIALS:  ${{ secrets.AZURE_CREDENTIALS }}
-      RESOURCE_GROUP:     sit722-prod-rg          # change if yours differs
-      LOCATION:           australiaeast           # change if needed
-      NAME:               prod-product            # <— match your portal name
+      RESOURCE_GROUP:     sit722-prod-rg          
+      LOCATION:           australiaeast           
+      NAME:               prod-product            
     steps:
       - name: Azure login
         uses: azure/login@v2
@@ -81,8 +81,6 @@ jobs:
 
       - name: Ensure prod resource group exists
         run: az group create --name $RESOURCE_GROUP --location $LOCATION
-
-      # Remove old container (ignore if missing) so DNS label stays consistent
       - name: Delete old container (ignore if missing)
         run: az container delete -g $RESOURCE_GROUP -n $NAME --yes || true
 
