@@ -1,118 +1,121 @@
-name: Production Deploy (on main)
+name: Production Deploy (on tag)
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    tags:
+      - "v*"
 
 jobs:
-  deploy:
+  build-and-push:
+    name: Build & push images with :prod tag
     runs-on: ubuntu-latest
-
-    # Common env you already have (from earlier)
     env:
-      RG: sit722-prod-rg
-      REGION: australiaeast
       ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
-
+      ACR_USERNAME:     ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # Gate: do we have AZURE_CREDENTIALS?
-      - name: Gate deploy on presence of AZURE_CREDENTIALS
-        id: gate
-        shell: bash
-        run: |
-          if [ -z "${{ secrets.AZURE_CREDENTIALS }}" ]; then
-            echo "deploy=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "deploy=true" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Log in to ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.ACR_LOGIN_SERVER }}
+          username: ${{ env.ACR_USERNAME }}
+          password: ${{ env.ACR_PASSWORD }}
 
-      - name: Skip note (no credentials configured)
-        if: steps.gate.outputs.deploy == 'false'
-        run: |
-          echo "::notice::AZURE_CREDENTIALS not set in repo secrets."
-          echo "Skipping production deployment. Add the Service Principal JSON"
-          echo "as repo secret 'AZURE_CREDENTIALS' and re-run."
+      # Build & push all images (tag with commit SHA + prod)
+      - name: Build & push frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/frontend:prod
 
-      # ---- Real deploy only when deploy=true ----
+      - name: Build & push customer_service
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/customer_service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/customer_service:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/customer_service:prod
 
+      - name: Build & push order_service
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/order_service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/order_service:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/order_service:prod
+
+      - name: Build & push product_service
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend/product_service
+          push: true
+          tags: |
+            ${{ env.ACR_LOGIN_SERVER }}/product_service:${{ github.sha }}
+            ${{ env.ACR_LOGIN_SERVER }}/product_service:prod
+
+  deploy:
+    name: Deploy product_service to PROD ACI + health
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    env:
+      ACR_LOGIN_SERVER:   ${{ secrets.ACR_LOGIN_SERVER }}
+      ACR_USERNAME:       ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD:       ${{ secrets.ACR_PASSWORD }}
+      AZURE_CREDENTIALS:  ${{ secrets.AZURE_CREDENTIALS }}
+      RESOURCE_GROUP:     sit722-prod-rg          # <- change if you use a different prod RG
+      LOCATION:           australiaeast           # <- change if needed
+      NAME:               svc-product-prod
+    steps:
       - name: Azure login
-        if: steps.gate.outputs.deploy == 'true'
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ env.AZURE_CREDENTIALS }}
 
-      - name: Ensure resource group exists
-        if: steps.gate.outputs.deploy == 'true'
-        run: az group create -n "$RG" -l "$REGION"
+      - name: Ensure prod resource group exists
+        run: az group create --name $RESOURCE_GROUP --location $LOCATION
 
-      - name: Replace prod-product-db
-        if: steps.gate.outputs.deploy == 'true'
-        shell: bash
+      # Remove old container (if exists) to keep DNS label simple/reusable
+      - name: Delete old container (ignore if missing)
+        run: az container delete -g $RESOURCE_GROUP -n $NAME --yes || true
+
+      - name: Create container from :prod image
         run: |
-          az container delete -g "$RG" -n prod-product-db --yes --no-wait || true
-          az container wait   -g "$RG" -n prod-product-db --deleted --interval 5 --timeout 120 || true
-          az container create -g "$RG" -n prod-product-db \
-            --image docker.io/library/postgres:15-alpine \
-            --os-type Linux --cpu 1 --memory 1 \
-            --ports 5432 --ip-address Public \
-            --environment-variables POSTGRES_DB=products POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
-            --location "$REGION"
-          DB_IP=$(az container show -g "$RG" -n prod-product-db --query ipAddress.ip -o tsv)
-          echo "DB_IP=$DB_IP" >> "$GITHUB_ENV"
+          az container create \
+            --resource-group $RESOURCE_GROUP \
+            --name $NAME \
+            --image $ACR_LOGIN_SERVER/product_service:prod \
+            --registry-login-server $ACR_LOGIN_SERVER \
+            --registry-username $ACR_USERNAME \
+            --registry-password $ACR_PASSWORD \
+            --dns-name-label $NAME \
+            --ports 8000
 
-      - name: Replace prod-product
-        if: steps.gate.outputs.deploy == 'true'
-        shell: bash
+      - name: Wait for public IP and /health
         run: |
-          az container delete -g "$RG" -n prod-product --yes --no-wait || true
-          az container wait   -g "$RG" -n prod-product --deleted --interval 5 --timeout 120 || true
-          az container create -g "$RG" -n prod-product \
-            --image "$ACR_LOGIN_SERVER/product_service:testing" \
-            --registry-login-server "$ACR_LOGIN_SERVER" \
-            --registry-username "$ACR_USERNAME" \
-            --registry-password "$ACR_PASSWORD" \
-            --os-type Linux --cpu 1 --memory 1 \
-            --ports 8000 --ip-address Public \
-            --environment-variables \
-              POSTGRES_HOST=${{ env.DB_IP }} \
-              POSTGRES_USER=postgres \
-              POSTGRES_PASSWORD=postgres \
-              POSTGRES_DB=products \
-            --location "$REGION"
-          PRODUCT_IP=$(az container show -g "$RG" -n prod-product --query ipAddress.ip -o tsv)
-          echo "PRODUCT_IP=$PRODUCT_IP" >> "$GITHUB_ENV"
-
-      - name: Replace prod-frontend
-        if: steps.gate.outputs.deploy == 'true'
-        shell: bash
-        run: |
-          az container delete -g "$RG" -n prod-frontend --yes --no-wait || true
-          az container wait   -g "$RG" -n prod-frontend --deleted --interval 5 --timeout 120 || true
-          az container create -g "$RG" -n prod-frontend \
-            --image "$ACR_LOGIN_SERVER/frontend:testing" \
-            --registry-login-server "$ACR_LOGIN_SERVER" \
-            --registry-username "$ACR_USERNAME" \
-            --registry-password "$ACR_PASSWORD" \
-            --os-type Linux --cpu 1 --memory 1.5 \
-            --ports 80 --ip-address Public \
-            --dns-name-label sit722-prod-$RANDOM \
-            --location "$REGION"
-
-      - name: Smoke test Product API
-        if: steps.gate.outputs.deploy == 'true'
-        shell: bash
-        run: |
-          echo "Testing http://$PRODUCT_IP:8000"
-          for i in {1..12}; do
-            if curl -fsS "http://$PRODUCT_IP:8000" | grep -q 'Welcome to the Product Service'; then
-              echo "OK"; exit 0
-            fi
-            echo "retry $i"; sleep 5
+          IP=""
+          for i in {1..30}; do
+            IP=$(az container show -g $RESOURCE_GROUP -n $NAME --query ipAddress.ip -o tsv || true)
+            [ -n "$IP" ] && [ "$IP" != "null" ] && break
+            echo "Waiting for IP... ($i/30)"; sleep 5
           done
-          echo "Product endpoint failed" >&2
-          exit 1
+          echo "IP=$IP"
+          if [ -z "$IP" ] || [ "$IP" = "null" ]; then
+            echo "No IP assigned"; exit 1
+          fi
+
+          for i in {1..30}; do
+            if curl -fsS "http://$IP:8000/health" >/dev/null; then
+              echo "Prod product_service healthy at http://$IP:8000/health"
+              exit 0
+            fi
+            echo "Waiting for /health... ($i/30)"; sleep 5
+          done
+          echo "Health check failed"; exit 1
