@@ -1,86 +1,67 @@
 name: Staging Deploy (create -> test -> destroy)
 
 on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: ["CI (tests -> build -> push)"]
-    types: [completed]
-    branches: [testing]
+  workflow_dispatch: {}   # <<< makes the "Run workflow" button work
 
 jobs:
-  deploy-staging:
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success') }}
+  deploy:
     runs-on: ubuntu-latest
     env:
-      RG: sit722-staging-rg
-      REGION: australiaeast
       ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
-    steps:
-      - uses: actions/checkout@v4
+      ACR_USERNAME:     ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD:     ${{ secrets.ACR_PASSWORD }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
 
+      RESOURCE_GROUP:   sit722-staging-rg
+      LOCATION:         australiaeast
+      NAME:             staging-product
+      IMAGE:            product_service:testing
+    steps:
       - name: Azure login
         uses: azure/login@v2
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          creds: ${{ env.AZURE_CREDENTIALS }}
 
-      - name: Create RG
-        run: az group create -n "$RG" -l "$REGION"
+      - name: Ensure resource group
+        run: az group create --name "$RESOURCE_GROUP" --location "$LOCATION"
 
-      - name: Create product DB
+      - name: Delete old container (ignore if missing)
+        run: az container delete -g "$RESOURCE_GROUP" -n "$NAME" --yes || true
+
+      - name: Deploy container from ACR
         run: |
-          az container create -g "$RG" -n svc-product-db \
-            --image docker.io/library/postgres:15-alpine \
-            --os-type Linux --cpu 1 --memory 1 \
-            --ports 5432 --ip-address Public \
-            --environment-variables POSTGRES_DB=products POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
-            --location "$REGION"
-          DB_IP=$(az container show -g "$RG" -n svc-product-db --query ipAddress.ip -o tsv)
-          echo "DB_IP=$DB_IP" >> $GITHUB_ENV
-
-      - name: Deploy product-service
-        run: |
-          az container create -g "$RG" -n svc-product \
-            --image "$ACR_LOGIN_SERVER/product_service:testing" \
+          az container create \
+            --resource-group "$RESOURCE_GROUP" \
+            --name "$NAME" \
+            --image "$ACR_LOGIN_SERVER/$IMAGE" \
             --registry-login-server "$ACR_LOGIN_SERVER" \
             --registry-username "$ACR_USERNAME" \
             --registry-password "$ACR_PASSWORD" \
-            --os-type Linux --cpu 1 --memory 1 \
-            --ports 8000 --ip-address Public \
-            --environment-variables \
-              POSTGRES_HOST=${{ env.DB_IP }} \
-              POSTGRES_USER=postgres \
-              POSTGRES_PASSWORD=postgres \
-              POSTGRES_DB=products \
-            --location "$REGION"
-          PRODUCT_IP=$(az container show -g "$RG" -n svc-product --query ipAddress.ip -o tsv)
-          echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+            --dns-name-label "$NAME" \
+            --ports 8000
 
-      - name: Deploy frontend
+      - name: Wait for public IP and /health
         run: |
-          az container create -g "$RG" -n web-frontend \
-            --image "$ACR_LOGIN_SERVER/frontend:testing" \
-            --registry-login-server "$ACR_LOGIN_SERVER" \
-            --registry-username "$ACR_USERNAME" \
-            --registry-password "$ACR_PASSWORD" \
-            --os-type Linux --cpu 1 --memory 1.5 \
-            --ports 80 --ip-address Public \
-            --dns-name-label sit722-$RANDOM \
-            --location "$REGION"
-
-      - name: Smoke test product endpoint
-        run: |
-          echo "Testing http://$PRODUCT_IP:8000"
-          for i in {1..12}; do
-            if curl -fsS "http://$PRODUCT_IP:8000" | grep -q 'Welcome to the Product Service'; then
-              echo "OK"; exit 0
-            fi
-            echo "retry $i"; sleep 5
+          IP=""
+          for i in {1..30}; do
+            IP=$(az container show -g "$RESOURCE_GROUP" -n "$NAME" --query ipAddress.ip -o tsv || true)
+            [ -n "$IP" ] && [ "$IP" != "null" ] && break
+            echo "Waiting for IP... ($i/30)"; sleep 5
           done
-          echo "Product endpoint failed" >&2
-          exit 1
+          echo "IP=$IP"
+          if [ -z "$IP" ] || [ "$IP" = "null" ]; then
+            echo "No IP assigned"; exit 1
+          fi
 
-      - name: Destroy staging RG (always)
+          for i in {1..30}; do
+            if curl -fsS "http://$IP:8000/health" >/dev/null; then
+              echo "Staging healthy at http://$IP:8000/health"
+              exit 0
+            fi
+            echo "Waiting for /health... ($i/30)"; sleep 5
+          done
+          echo "Health check failed"; exit 1
+
+      - name: Clean up staging (save cost)
         if: always()
-        run: az group delete -n "$RG" --yes --no-wait
+        run: az container delete -g "$RESOURCE_GROUP" -n "$NAME" --yes || true
